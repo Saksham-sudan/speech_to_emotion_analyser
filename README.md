@@ -1,6 +1,6 @@
 First install these libraries using pip install in your terminal using this command:
 
-pip install librosa sounddevice numpy os scikit-learn streamlit matplotlib joblib
+pip install librosa sounddevice numpy os scikit-learn streamlit matplotlib joblib torch transformers
 
 After that type the following command in your terminal and click enter:
 
