@@ -1,54 +1,111 @@
 import streamlit as st
 import sounddevice as sd
 import numpy as np
-import librosa
-import joblib
-import matplotlib.pyplot as plt
+import torch
+import time
+import queue
+from transformers import (
+    Wav2Vec2ForSequenceClassification,
+    Wav2Vec2Processor,
+    Wav2Vec2FeatureExtractor,
+)
 
-# Load your trained model
-model = joblib.load("emotion_model.pkl")
-emotions = model.classes_
 
-def record_audio(duration=3, sr=22050):
-    st.write("🎤 Recording...")
-    audio = sd.rec(int(duration * sr), samplerate=sr, channels=1, dtype='float32')
-    sd.wait()
-    st.write("✅ Recording complete")
-    return np.squeeze(audio), sr
+MODEL_NAME = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
+SAMPLING_RATE = 16000
+WINDOW_DURATION = 3
+STEP_DURATION = 0.5
+SAMPLES_PER_STEP = int(STEP_DURATION * SAMPLING_RATE)
+WINDOW_SAMPLES = int(WINDOW_DURATION * SAMPLING_RATE)
+CONFIDENCE_THRESHOLD = 0.05
+ALPHA = 0.2
 
-def extract_features(audio, sr=22050):
-    mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=40)
-    return np.mean(mfccs.T, axis=0)
+@st.cache_resource
+def load_model():
+    try:
+        processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME)
+    except Exception:
+        processor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_NAME)
 
-# Streamlit UI
-st.title("🎶 Real-Time Speech Emotion Analyzer")
+    model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_NAME)
+    model.eval()
+    return processor, model
 
-st.write("Press the button below to record a 3-second audio clip and analyze its emotion.")
+processor, model = load_model()
 
-if st.button("Record & Predict"):
-    audio, sr = record_audio()
-    features = extract_features(audio, sr)
 
-    pred = model.predict([features])[0]
-    proba = model.predict_proba([features])[0]
+st.set_page_config(page_title="🎙️ Real-Time Speech Emotion Analyzer", layout="centered")
+st.title("🎙️ Real-Time Speech Emotion Analyzer (Smoothed)")
+st.markdown("This app uses a **sliding window** and **EMA smoothing** for stable, real-time emotion detection.")
 
-    # Show prediction
-    st.subheader(f"🎯 Predicted Emotion: **{pred}**")
+run_button = st.toggle("🎧 Start / Stop Listening")
 
-    # Show confidence bar chart
-    st.bar_chart({emo: p for emo, p in zip(emotions, proba)})
+emotion_placeholder = st.empty()
+confidence_placeholder = st.empty()
 
-    # Show waveform
-    fig, ax = plt.subplots()
-    ax.plot(audio)
-    ax.set_title("Waveform")
-    st.pyplot(fig)
 
-    # Optional: spectrogram
-    fig2, ax2 = plt.subplots()
-    S = librosa.feature.melspectrogram(y=audio, sr=sr)
-    S_dB = librosa.power_to_db(S, ref=np.max)
-    img = librosa.display.specshow(S_dB, sr=sr, x_axis='time', y_axis='mel', ax=ax2)
-    ax2.set_title("Mel Spectrogram")
-    fig2.colorbar(img, ax=ax2, format="%+2.0f dB")
-    st.pyplot(fig2)
+data_queue = queue.Queue()
+
+
+num_labels = len(model.config.id2label)
+smoothed_probs = np.zeros(num_labels, dtype='float32')
+
+def audio_callback(indata, frames, time, status):
+    if status:
+        print(status, flush=True)
+    data_queue.put(indata.copy())
+
+if run_button:
+    st.info("Listening... Speak now 🎤")
+
+    audio_buffer = np.zeros(WINDOW_SAMPLES, dtype='float32')
+
+    stream = sd.InputStream(
+        callback=audio_callback,
+        channels=1,
+        samplerate=SAMPLING_RATE,
+        blocksize=SAMPLES_PER_STEP
+    )
+    stream.start()
+
+    while run_button:
+        try:
+            chunk = data_queue.get(timeout=0.1) 
+            chunk = chunk.squeeze()
+
+            audio_buffer = np.roll(audio_buffer, -len(chunk))
+            audio_buffer[-len(chunk):] = chunk
+
+            audio_tensor = torch.tensor(audio_buffer)
+            inputs = processor(audio_tensor, sampling_rate=SAMPLING_RATE, return_tensors="pt", padding=True)
+
+            with torch.no_grad():
+                logits = model(**inputs).logits
+
+            
+            current_probs = torch.softmax(logits, dim=1)[0].numpy()
+
+      
+            smoothed_probs = ALPHA * current_probs + (1 - ALPHA) * smoothed_probs
+
+            
+            pred_id = np.argmax(smoothed_probs)
+            confidence = smoothed_probs[pred_id]
+            emotion = model.config.id2label[pred_id]
+
+            
+            if confidence > CONFIDENCE_THRESHOLD:
+                emotion_placeholder.markdown(f"## 🎭 Emotion: **{emotion.capitalize()}**")
+                confidence_placeholder.progress(float(confidence))
+            else:
+                emotion_placeholder.markdown("## 🤔 Emotion: **Listening...**")
+                confidence_placeholder.progress(float(confidence))
+
+        except queue.Empty:
+            
+            time.sleep(0.05)
+            continue
+
+    stream.stop()
+    stream.close()
+    st.warning("🛑 Listening stopped.")
