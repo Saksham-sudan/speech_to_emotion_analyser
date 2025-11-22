@@ -11,11 +11,14 @@ from transformers import (
     Wav2Vec2ForSequenceClassification,
     Wav2Vec2Processor,
     Wav2Vec2FeatureExtractor,
-    Wav2Vec2ForCTC
+    WhisperProcessor,
+    WhisperForConditionalGeneration
 )
 
+# --- CONFIGURATION ---
 MODEL_NAME = "r-f/wav2vec-english-speech-emotion-recognition"
-ASR_MODEL_NAME = "facebook/wav2vec2-base-960h"
+ASR_MODEL_NAME = "openai/whisper-tiny" 
+
 SAMPLING_RATE = 16000
 WINDOW_DURATION = 3
 STEP_DURATION = 0.5
@@ -27,19 +30,24 @@ VAD_CHUNK_SIZE = 512
 
 @st.cache_resource
 def load_models():
+    # 1. Emotion Model
     try:
         processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME)
     except Exception:
         processor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_NAME)
     model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_NAME)
     model.eval()
+    
+    # 2. VAD Model
     vad_model, _ = torch.hub.load(
         repo_or_dir='snakers4/silero-vad',
         model='silero_vad',
         force_reload=False
     )
-    asr_processor = Wav2Vec2Processor.from_pretrained(ASR_MODEL_NAME)
-    asr_model = Wav2Vec2ForCTC.from_pretrained(ASR_MODEL_NAME)
+    
+    # 3. Whisper Transcription Model
+    asr_processor = WhisperProcessor.from_pretrained(ASR_MODEL_NAME)
+    asr_model = WhisperForConditionalGeneration.from_pretrained(ASR_MODEL_NAME)
     asr_model.eval()
 
     return processor, model, vad_model, asr_processor, asr_model
@@ -48,7 +56,7 @@ processor, model, vad_model, asr_processor, asr_model = load_models()
 
 st.set_page_config(page_title="🎙️ Real-Time Speech Emotion Analyzer", layout="centered")
 st.title("🎙️ Real-Time Speech Emotion Analyzer")
-st.markdown("This app uses a **sliding window**, **noise reduction**, **VAD**, and **smoothing** for stable, real-time emotion detection.")
+st.markdown("This app uses a **sliding window**, **VAD**, and **Whisper** for high-accuracy real-time analysis.")
 
 mode = st.radio(
     "Choose analysis mode:",
@@ -64,12 +72,14 @@ st.markdown("### Top 3 Emotions:")
 top1_placeholder = st.empty()
 top2_placeholder = st.empty()
 top3_placeholder = st.empty()
-st.markdown("---")
-st.markdown("### Emotion Timeline")
-chart_placeholder = st.empty()
+
 st.markdown("---")
 st.markdown("### Transcription")
 transcription_placeholder = st.empty()
+
+st.markdown("---")
+st.markdown("### Emotion Timeline")
+chart_placeholder = st.empty()
 
 
 data_queue = queue.Queue()
@@ -84,8 +94,27 @@ def audio_callback(indata, frames, time, status):
         print(status, flush=True)
     data_queue.put(indata.copy())
 
+# --- HELPER: TRANSCRIPTION FUNCTION ---
+def transcribe_audio(audio_data):
+    input_features = asr_processor(
+        audio_data, 
+        sampling_rate=SAMPLING_RATE, 
+        return_tensors="pt"
+    ).input_features
+    
+    with torch.no_grad():
+        predicted_ids = asr_model.generate(input_features)
+    
+    transcription = asr_processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+    return transcription.strip()
+
 if mode == "🎙️ Live":
-    run_button = st.toggle("🎧 Start / Stop Listening")
+    # --- UI CONTROLS ---
+    col1, col2 = st.columns(2)
+    with col1:
+        run_button = st.toggle("🎧 Start / Stop Listening")
+    with col2:
+        enable_transcription = st.toggle("📝 Enable Transcription", value=True)
 
     if run_button:
         st.info("Listening... Speak now 🎤")
@@ -107,48 +136,42 @@ if mode == "🎙️ Live":
         current_chunks = 0
 
         while run_button:
-            # Initialize has_speech to False at the start of every loop
-            has_speech = False
-            
             try:
-                chunk = data_queue.get(timeout=0.1).squeeze()
-                chunk = nr.reduce_noise(y=chunk, sr=SAMPLING_RATE)
+                # 1. Get RAW chunk
+                raw_chunk = data_queue.get(timeout=0.1).squeeze()
                 
-                audio_buffer = np.roll(audio_buffer, -len(chunk))
-                audio_buffer[-len(chunk):] = chunk
+                # 2. Clean chunk for Emotion Model
+                clean_chunk = nr.reduce_noise(y=raw_chunk, sr=SAMPLING_RATE)
+                
+                audio_buffer = np.roll(audio_buffer, -len(clean_chunk))
+                audio_buffer[-len(clean_chunk):] = clean_chunk
                 
                 if not buffer_is_warm:
                     current_chunks += 1
                     emotion_placeholder.markdown("## 🔥 **Warming up buffer...**")
                     confidence_placeholder.progress(current_chunks / warmup_chunks_needed)
-                    
                     if current_chunks >= warmup_chunks_needed:
                         buffer_is_warm = True
                     continue
 
-                # Run VAD
-                num_vad_chunks = len(chunk) // VAD_CHUNK_SIZE
+                # 3. VAD Logic
+                has_speech = False
+                num_vad_chunks = len(clean_chunk) // VAD_CHUNK_SIZE
                 for i in range(num_vad_chunks):
                     start = i * VAD_CHUNK_SIZE
                     end = start + VAD_CHUNK_SIZE
-                    vad_input_tensor = torch.tensor(chunk[start:end])
+                    vad_input_tensor = torch.tensor(clean_chunk[start:end])
                     speech_prob = vad_model(vad_input_tensor, SAMPLING_RATE).item()
                     if speech_prob > 0.5:
                         has_speech = True
                         break
                 
-                # Add to buffer only if speech is detected
+                # 4. Logic Handling
                 if has_speech:
-                    speech_buffer.append(chunk)
-
-            except queue.Empty:
-                # If queue is empty, we just wait. has_speech remains False.
-                time.sleep(0.05)
-            
-            # --- LOGIC BLOCK (Runs even if queue was empty) ---
-            if buffer_is_warm:
-                
-                if has_speech:
+                    # If transcription is enabled, save RAW audio
+                    if enable_transcription:
+                        speech_buffer.append(raw_chunk) 
+                    
                     # Emotion Prediction
                     audio_tensor = torch.tensor(audio_buffer)
                     inputs = processor(audio_tensor, sampling_rate=SAMPLING_RATE, return_tensors="pt", padding=True)
@@ -158,31 +181,22 @@ if mode == "🎙️ Live":
                     smoothed_probs = ALPHA * current_probs + (1 - ALPHA) * smoothed_probs
                 
                 else:
-                    # Silence Logic
+                    # Silence Detected
                     smoothed_probs = 0.05 * uniform_probs + 0.95 * smoothed_probs
                     
-                    # --- TRANSCRIPTION LOGIC (Runs on Silence) ---
+                    # --- CHECK TRANSCRIPTION TOGGLE ---
                     if len(speech_buffer) > 0:
-                        with st.spinner("Transcribing..."):
-                            speech_audio = np.concatenate(speech_buffer)
-                            speech_buffer = []
-                            
-                            input_values = asr_processor(
-                                speech_audio, 
-                                sampling_rate=SAMPLING_RATE, 
-                                return_tensors="pt"
-                            ).input_values
-                            
-                            with torch.no_grad():
-                                logits = asr_model(input_values).logits
-                            
-                            predicted_ids = torch.argmax(logits, dim=-1)
-                            transcription = asr_processor.batch_decode(predicted_ids)[0]
-                            
-                            if len(transcription) > 0:
-                                transcription_placeholder.markdown(f"**You said:** *{transcription.lower()}*")
+                        if enable_transcription:
+                            with st.spinner("Transcribing..."):
+                                speech_audio = np.concatenate(speech_buffer)
+                                text = transcribe_audio(speech_audio)
+                                if len(text) > 0:
+                                    transcription_placeholder.markdown(f"**You said:** *{text}*")
+                        
+                        # Always clear buffer on silence to prevent memory leaks
+                        speech_buffer = [] 
 
-                # Update UI
+                # 5. UI Update
                 st.session_state.emotion_history.append(smoothed_probs)
                 
                 top_3_indices = np.argsort(smoothed_probs)[-3:][::-1]
@@ -207,6 +221,7 @@ if mode == "🎙️ Live":
                     top1_placeholder.markdown("1. ...")
                     top2_placeholder.markdown("2. ...")
                     top3_placeholder.markdown("3. ...")
+                    # Note: We do NOT clear the transcription placeholder here so you can read it
 
                 if len(st.session_state.emotion_history) > 1:
                     emotion_labels = list(model.config.id2label.values())
@@ -218,28 +233,19 @@ if mode == "🎙️ Live":
                         history_df = history_df.tail(60)
                     chart_placeholder.line_chart(history_df)
 
-        # --- NEW: FINAL TRANSCRIPTION CHECK (Runs when you click STOP) ---
-        if len(speech_buffer) > 0:
+            except queue.Empty:
+                time.sleep(0.05)
+                continue
+
+        # Final check on Stop
+        if len(speech_buffer) > 0 and enable_transcription:
              with st.spinner("Finalizing transcription..."):
                 speech_audio = np.concatenate(speech_buffer)
                 speech_buffer = []
-                
-                input_values = asr_processor(
-                    speech_audio, 
-                    sampling_rate=SAMPLING_RATE, 
-                    return_tensors="pt"
-                ).input_values
-                
-                with torch.no_grad():
-                    logits = asr_model(input_values).logits
-                
-                predicted_ids = torch.argmax(logits, dim=-1)
-                transcription = asr_processor.batch_decode(predicted_ids)[0]
-                
-                if len(transcription) > 0:
-                    transcription_placeholder.markdown(f"**You said:** *{transcription.lower()}*")
-        # ---------------------------------------------------------------
-
+                text = transcribe_audio(speech_audio)
+                if len(text) > 0:
+                    transcription_placeholder.markdown(f"**You said:** *{text}*")
+        
         stream.stop()
         stream.close()
         st.warning("🛑 Listening stopped.")
@@ -249,6 +255,9 @@ elif mode == "📂 File":
         "Upload an audio file (WAV or MP3)",
         type=["wav", "mp3"]
     )
+    
+    # --- UI CONTROLS FOR FILE MODE ---
+    enable_transcription = st.toggle("📝 Enable Transcription for File", value=True)
     
     if uploaded_file is not None:
         with st.spinner(f"Analyzing '{uploaded_file.name}'..."):
@@ -276,6 +285,7 @@ elif mode == "📂 File":
             progress_bar = st.progress(0.0)
             
             total_chunks = len(y) // SAMPLES_PER_STEP
+            file_speech_buffer = []
             
             for i in range(total_chunks):
                 chunk = y_clean[i * SAMPLES_PER_STEP : (i + 1) * SAMPLES_PER_STEP]
@@ -304,6 +314,9 @@ elif mode == "📂 File":
                         break
 
                 if has_speech:
+                    if enable_transcription:
+                        file_speech_buffer.append(chunk)
+                        
                     audio_tensor = torch.tensor(audio_buffer)
                     inputs = processor(audio_tensor, sampling_rate=SAMPLING_RATE, return_tensors="pt", padding=True)
                     with torch.no_grad():
@@ -312,6 +325,15 @@ elif mode == "📂 File":
                     smoothed_probs = ALPHA * current_probs + (1 - ALPHA) * smoothed_probs
                 else:
                     smoothed_probs = 0.05 * uniform_probs + 0.95 * smoothed_probs
+                    
+                    # File Transcription Check
+                    if len(file_speech_buffer) > 0:
+                        if enable_transcription:
+                            speech_audio = np.concatenate(file_speech_buffer)
+                            text = transcribe_audio(speech_audio)
+                            if len(text) > 0:
+                                transcription_placeholder.markdown(f"**Transcript:** *{text}*")
+                        file_speech_buffer = []
 
                 st.session_state.emotion_history.append(smoothed_probs)
                 
@@ -351,6 +373,13 @@ elif mode == "📂 File":
                         chart_placeholder.line_chart(history_df)
                 
                 progress_bar.progress((i + 1) / total_chunks)
+        
+        # Final File Check
+        if len(file_speech_buffer) > 0 and enable_transcription:
+            speech_audio = np.concatenate(file_speech_buffer)
+            text = transcribe_audio(speech_audio)
+            if len(text) > 0:
+                transcription_placeholder.markdown(f"**Transcript:** *{text}*")
 
         st.success(f"✅ Analysis complete!")
         st.balloons()
