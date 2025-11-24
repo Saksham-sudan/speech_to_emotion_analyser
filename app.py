@@ -9,14 +9,14 @@ import plotly.graph_objects as go
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 from transformers import (
     Wav2Vec2ForSequenceClassification,
-    Wav2Vec2FeatureExtractor, # Used instead of Processor to avoid vocab errors
+    Wav2Vec2FeatureExtractor,
     WhisperProcessor,
     WhisperForConditionalGeneration
 )
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(
-    page_title="EmoVoice Cloud (High Acc)",
+    page_title="EmoVoice Cloud",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -38,28 +38,26 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- UPDATED CONSTANTS (High Accuracy) ---
-# 1. Emotion: XLSR (Better at accents/tone than the previous r-f model)
-MODEL_NAME = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
-
-# 2. Transcription: Distil-Whisper (Better than Tiny, Faster than Normal Small)
+# --- UPDATED CONSTANTS ---
+# Switch to 'r-f' model which is more stable for standard inference
+MODEL_NAME = "r-f/wav2vec-english-speech-emotion-recognition"
 ASR_MODEL_NAME = "distil-whisper/distil-small.en"
 
 SAMPLING_RATE = 16000
 WINDOW_DURATION = 3
 VAD_CHUNK_SIZE = 512 
-ALPHA = 0.2 # Smoothing factor
+ALPHA = 0.2 
 
-# --- 2. MODEL LOADING (QUANTIZED & FIXED) ---
+# --- 2. MODEL LOADING ---
 @st.cache_resource
 def load_models():
-    with st.spinner("Loading & Quantizing High-Acc Models..."):
+    with st.spinner("Loading & Quantizing Models..."):
         # 1. Emotion Model
-        # FIX: Use FeatureExtractor only. Prevents "vocab.json missing" error.
+        # Use FeatureExtractor to avoid "vocab.json" errors
         processor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_NAME)
         model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_NAME)
         
-        # Quantize Emotion Model (Crucial for Cloud RAM)
+        # Quantize (Compress) Emotion Model for Cloud RAM
         model = torch.quantization.quantize_dynamic(
             model, {torch.nn.Linear}, dtype=torch.qint8
         )
@@ -77,7 +75,7 @@ def load_models():
         asr_processor = WhisperProcessor.from_pretrained(ASR_MODEL_NAME)
         asr_model = WhisperForConditionalGeneration.from_pretrained(ASR_MODEL_NAME)
         
-        # Quantize Whisper (Crucial for Cloud RAM)
+        # Quantize Whisper Model
         asr_model = torch.quantization.quantize_dynamic(
             asr_model, {torch.nn.Linear}, dtype=torch.qint8
         )
@@ -96,7 +94,6 @@ def transcribe_audio(audio_data):
     ).input_features
     
     with torch.no_grad():
-        # forced_decoder_ids=None allows model to adapt better
         predicted_ids = asr_model.generate(input_features, max_new_tokens=128)
     
     transcription = asr_processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
@@ -129,40 +126,30 @@ def create_stable_chart(history_df, labels):
 data_queue = queue.Queue()
 
 def process_audio(frame: av.AudioFrame):
-    # Resample audio to 16kHz
     resampler = av.audio.resampler.AudioResampler(
         format="s16",
         layout="mono",
         rate=SAMPLING_RATE,
     )
-    raw_samples = frame.to_ndarray()
     frames = resampler.resample(frame)
     converted_samples = frames[0].to_ndarray().flatten()
-    
-    # Normalize to float32
     converted_samples = converted_samples.astype(np.float32) / 32768.0
-    
     data_queue.put(converted_samples)
     return frame
 
 # --- 5. UI LAYOUT ---
-
-# Sidebar
 with st.sidebar:
     st.title("⚙️ Settings")
     enable_transcription = st.toggle("📝 Enable Transcription", value=True)
     st.divider()
-    st.info(f"Model: {MODEL_NAME}\nASR: {ASR_MODEL_NAME}")
+    st.info(f"Emotion Model: {MODEL_NAME}\nASR Model: {ASR_MODEL_NAME}")
 
-# Main Header
 st.title("🎙️ EmoVoice Cloud")
-st.markdown("High-Accuracy Analysis (Accents & Emotions)")
+st.markdown("Real-time Emotion & Speech Analysis")
 
-# State Setup
 if 'emotion_history' not in st.session_state:
     st.session_state.emotion_history = []
 
-# HUD
 m1, m2, m3 = st.columns(3)
 with m1: metric_emotion = st.empty()
 with m2: metric_confidence = st.empty()
@@ -170,7 +157,6 @@ with m3: metric_vad = st.empty()
 
 st.divider()
 
-# Viz Area
 col_viz, col_text = st.columns([2, 1])
 with col_viz:
     st.subheader("Emotion Timeline")
@@ -179,9 +165,8 @@ with col_text:
     st.subheader("Live Transcript")
     transcription_placeholder = st.empty()
 
-# --- 6. LIVE ANALYSIS LOGIC ---
 st.markdown("### 🔴 Start Analysis")
-st.caption("Click START below. Please wait ~10s for models to load.")
+st.caption("Click START below. Allow browser microphone access.")
 
 ctx = webrtc_streamer(
     key="emotion-ai",
@@ -224,7 +209,6 @@ if ctx.state.playing:
                 continue
                 
             new_data = np.concatenate(chunks)
-            
             overlap_len = len(new_data)
             audio_buffer = np.roll(audio_buffer, -overlap_len)
             audio_buffer[-overlap_len:] = new_data
@@ -234,7 +218,7 @@ if ctx.state.playing:
                 metric_vad.metric("Status", "Buffering...")
                 continue
 
-            # VAD
+            # VAD Check
             vad_window = audio_buffer[-int(0.5 * SAMPLING_RATE):]
             vad_tensor = torch.tensor(vad_window)
             
@@ -266,9 +250,9 @@ if ctx.state.playing:
             else:
                 smoothed_probs = 0.05 * uniform_probs + 0.95 * smoothed_probs
                 
+                # Transcribe
                 if len(speech_buffer) > 0 and enable_transcription:
                     total_speech = np.concatenate(speech_buffer)
-                    # Transcribe only if segment is long enough to be a word
                     if len(total_speech) > int(0.8 * SAMPLING_RATE): 
                         text = transcribe_audio(total_speech)
                         if text:
@@ -297,8 +281,5 @@ if ctx.state.playing:
                 )
                 
         except Exception as e:
-            # This helps debug issues in the cloud logs
-            print(f"Error in loop: {e}")
+            print(f"Error: {e}")
             break
-
-
