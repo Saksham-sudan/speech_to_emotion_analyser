@@ -398,9 +398,16 @@ with tab_live:
 
     st.divider()
 
-    # Chart Area (Full Width)
-    st.subheader("📈 Emotion Timeline")
-    chart_placeholder = st.empty()
+    # Chart & Transcript Area
+    col_viz, col_text = st.columns([2, 1])
+    
+    with col_viz:
+        st.subheader("📈 Emotion Timeline")
+        chart_placeholder = st.empty()
+        
+    with col_text:
+        st.subheader("📝 Live Transcript")
+        transcription_placeholder = st.empty()
         
     # --- LOGIC LOOP ---
     if run_button:
@@ -453,6 +460,8 @@ with tab_live:
 
                 # 4. Processing
                 if has_speech:
+                    if enable_transcription: speech_buffer.append(raw_chunk)
+                    
                     audio_tensor = torch.tensor(audio_buffer)
                     inputs = processor(audio_tensor, sampling_rate=SAMPLING_RATE, return_tensors="pt", padding=True)
                     with torch.no_grad():
@@ -461,6 +470,37 @@ with tab_live:
                     smoothed_probs = ALPHA * current_probs + (1 - ALPHA) * smoothed_probs
                 else:
                     smoothed_probs = 0.05 * uniform_probs + 0.95 * smoothed_probs
+                    
+                    # Transcribe on Silence
+                    if len(speech_buffer) > 0 and enable_transcription:
+                        text = transcribe_audio(np.concatenate(speech_buffer))
+                        if text:
+                            current_time = time.time() - st.session_state.session_start_time
+                            top_emotion = model.config.id2label[np.argmax(smoothed_probs)]
+                            
+                            st.session_state.transcript_segments.append({
+                                'time': current_time,
+                                'text': text,
+                                'emotion': top_emotion
+                            })
+                            full_transcript += f" {text}"
+                            
+                            # Render transcript with emotion colors
+                            transcript_html = "<div style='max-height: 400px; overflow-y: auto;'>"
+                            for seg in st.session_state.transcript_segments[-5:]:
+                                color = EMOTION_COLORS.get(seg['emotion'].lower(), '#667eea')
+                                transcript_html += f"""
+                                <div class='transcript-segment' style='border-left: 3px solid {color};'>
+                                    <div style='display: flex; justify-content: space-between; margin-bottom: 8px;'>
+                                        <span style='color: {color}; font-weight: 600;'>{seg['emotion'].capitalize()}</span>
+                                        <span style='color: #6b7280; font-size: 0.85em;'>{seg['time']:.1f}s</span>
+                                    </div>
+                                    <div style='color: #e5e7eb;'>{seg['text']}</div>
+                                </div>
+                                """
+                            transcript_html += "</div>"
+                            transcription_placeholder.markdown(transcript_html, unsafe_allow_html=True)
+                        speech_buffer = []
 
                 # 5. UI Updates
                 st.session_state.emotion_history.append(smoothed_probs)
@@ -594,7 +634,7 @@ with tab_file:
         # Show Results
         st.success("Analysis complete! View results below.")
         
-        result_col1, result_col2 = st.columns([3, 1])
+        result_col1, result_col2 = st.columns([2, 1])
         
         with result_col1:
             if len(st.session_state.emotion_history) > 0:
@@ -604,14 +644,19 @@ with tab_file:
                 st.plotly_chart(fig, use_container_width=True)
         
         with result_col2:
-            # Summary stats
-            if len(st.session_state.emotion_history) > 0:
-                df = pd.DataFrame(st.session_state.emotion_history, columns=list(model.config.id2label.values()))
-                dominant = df.idxmax(axis=1).mode()[0]
-                avg_conf = df.max(axis=1).mean()
-                
-                st.metric("Dominant Emotion", dominant.capitalize())
-                st.metric("Avg Confidence", f"{avg_conf:.1%}")
+            if st.session_state.transcript_segments:
+                st.subheader("📝 Transcript")
+                for seg in st.session_state.transcript_segments:
+                    color = EMOTION_COLORS.get(seg['emotion'].lower(), '#667eea')
+                    st.markdown(f"""
+                    <div class='transcript-segment' style='border-left: 3px solid {color};'>
+                        <div style='display: flex; justify-content: space-between; margin-bottom: 8px;'>
+                            <span style='color: {color}; font-weight: 600;'>{seg['emotion'].capitalize()}</span>
+                            <span style='color: #6b7280; font-size: 0.85em;'>{seg['time']:.1f}s</span>
+                        </div>
+                        <div style='color: #e5e7eb;'>{seg['text']}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
 # --- TAB 3: ENHANCED REPORT ---
 with tab_report:
@@ -758,4 +803,3 @@ with tab_report:
             <p style='color: #9ca3af; font-size: 1.1em;'>Start recording or upload a file to see analytics here</p>
         </div>
         """, unsafe_allow_html=True)
-        
