@@ -9,15 +9,15 @@ import plotly.graph_objects as go
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 from transformers import (
     Wav2Vec2ForSequenceClassification,
-    Wav2Vec2Processor,
+    Wav2Vec2FeatureExtractor, # Used instead of Processor to avoid vocab errors
     WhisperProcessor,
     WhisperForConditionalGeneration
 )
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(
-    page_title="EmoVoice Cloud",
-    page_icon="☁️",
+    page_title="EmoVoice Cloud (High Acc)",
+    page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -38,29 +38,34 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Constants
-MODEL_NAME = "r-f/wav2vec-english-speech-emotion-recognition"
-ASR_MODEL_NAME = "openai/whisper-tiny" # Tiny is best for Cloud Free Tier
+# --- UPDATED CONSTANTS (High Accuracy) ---
+# 1. Emotion: XLSR (Better at accents/tone than the previous r-f model)
+MODEL_NAME = "harshit345/xlsr-wav2vec-speech-emotion-recognition"
+
+# 2. Transcription: Distil-Whisper (Better than Tiny, Faster than Normal Small)
+ASR_MODEL_NAME = "distil-whisper/distil-small.en"
+
 SAMPLING_RATE = 16000
 WINDOW_DURATION = 3
-# Webrtc chunks are small, so we accumulate them
 VAD_CHUNK_SIZE = 512 
+ALPHA = 0.2 # Smoothing factor
 
-# --- 2. MODEL LOADING (QUANTIZED) ---
+# --- 2. MODEL LOADING (QUANTIZED & FIXED) ---
 @st.cache_resource
 def load_models():
-    with st.spinner("Loading & Quantizing Models for Cloud..."):
+    with st.spinner("Loading & Quantizing High-Acc Models..."):
         # 1. Emotion Model
-        processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME)
+        # FIX: Use FeatureExtractor only. Prevents "vocab.json missing" error.
+        processor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_NAME)
         model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_NAME)
         
-        # Quantize Emotion Model (Reduces RAM by ~50%)
+        # Quantize Emotion Model (Crucial for Cloud RAM)
         model = torch.quantization.quantize_dynamic(
             model, {torch.nn.Linear}, dtype=torch.qint8
         )
         model.eval()
         
-        # 2. VAD Model (Silero is already small)
+        # 2. VAD Model
         vad_model, _ = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
             model='silero_vad',
@@ -71,7 +76,7 @@ def load_models():
         asr_processor = WhisperProcessor.from_pretrained(ASR_MODEL_NAME)
         asr_model = WhisperForConditionalGeneration.from_pretrained(ASR_MODEL_NAME)
         
-        # Quantize Whisper (Crucial for Cloud)
+        # Quantize Whisper (Crucial for Cloud RAM)
         asr_model = torch.quantization.quantize_dynamic(
             asr_model, {torch.nn.Linear}, dtype=torch.qint8
         )
@@ -88,8 +93,11 @@ def transcribe_audio(audio_data):
         sampling_rate=SAMPLING_RATE, 
         return_tensors="pt"
     ).input_features
+    
     with torch.no_grad():
-        predicted_ids = asr_model.generate(input_features)
+        # forced_decoder_ids=None allows model to adapt better
+        predicted_ids = asr_model.generate(input_features, max_new_tokens=128)
+    
     transcription = asr_processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
     return transcription.strip()
 
@@ -117,28 +125,23 @@ def create_stable_chart(history_df, labels):
     return fig
 
 # --- 4. WEBRTC AUDIO PROCESSOR ---
-# This runs in a separate thread!
 data_queue = queue.Queue()
 
 def process_audio(frame: av.AudioFrame):
-    # Resample audio to 16kHz (Browsers usually send 48kHz)
+    # Resample audio to 16kHz
     resampler = av.audio.resampler.AudioResampler(
         format="s16",
         layout="mono",
         rate=SAMPLING_RATE,
     )
-    
     raw_samples = frame.to_ndarray()
-    # Resample
     frames = resampler.resample(frame)
     converted_samples = frames[0].to_ndarray().flatten()
     
-    # Normalize to float32 -1..1
+    # Normalize to float32
     converted_samples = converted_samples.astype(np.float32) / 32768.0
     
-    # Put into queue for the main thread to process
     data_queue.put(converted_samples)
-    
     return frame
 
 # --- 5. UI LAYOUT ---
@@ -148,11 +151,11 @@ with st.sidebar:
     st.title("⚙️ Settings")
     enable_transcription = st.toggle("📝 Enable Transcription", value=True)
     st.divider()
-    st.info("Running optimized quantized models for Cloud.")
+    st.info(f"Model: {MODEL_NAME}\nASR: {ASR_MODEL_NAME}")
 
 # Main Header
 st.title("🎙️ EmoVoice Cloud")
-st.markdown("Real-time emotional intelligence in your browser.")
+st.markdown("High-Accuracy Analysis (Accents & Emotions)")
 
 # State Setup
 if 'emotion_history' not in st.session_state:
@@ -177,9 +180,8 @@ with col_text:
 
 # --- 6. LIVE ANALYSIS LOGIC ---
 st.markdown("### 🔴 Start Analysis")
-st.caption("Click START below and allow microphone access.")
+st.caption("Click START below. Please wait ~10s for models to load.")
 
-# WebRTC Streamer (Replaces sounddevice)
 ctx = webrtc_streamer(
     key="emotion-ai",
     mode=WebRtcMode.SENDONLY,
@@ -188,15 +190,13 @@ ctx = webrtc_streamer(
         {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
     ),
     media_stream_constraints={"video": False, "audio": True},
-    audio_frame_callback=process_audio,  # Specify the callback
+    audio_frame_callback=process_audio,
 )
 
-# Main Processing Loop
 if ctx.state.playing:
     audio_buffer = np.zeros(int(WINDOW_DURATION * SAMPLING_RATE), dtype='float32')
     speech_buffer = []
     
-    # Init Metrics
     metric_emotion.metric("Dominant Emotion", "Waiting...")
     metric_confidence.metric("Confidence", "0%")
     metric_vad.metric("Voice Status", "Silence")
@@ -208,10 +208,8 @@ if ctx.state.playing:
     full_transcript = ""
     buffer_fill_level = 0
     
-    # Loop continuously while streaming
     while ctx.state.playing:
         try:
-            # Get ALL available chunks from the queue (to prevent lag)
             chunks = []
             while True:
                 try:
@@ -224,27 +222,21 @@ if ctx.state.playing:
                 time.sleep(0.05)
                 continue
                 
-            # Concatenate all new chunks
             new_data = np.concatenate(chunks)
             
-            # --- AUDIO BUFFER MANAGEMENT ---
-            # We roll the buffer and add new data
             overlap_len = len(new_data)
             audio_buffer = np.roll(audio_buffer, -overlap_len)
             audio_buffer[-overlap_len:] = new_data
             buffer_fill_level += overlap_len
             
-            # Wait for 1 second of audio before starting logic
             if buffer_fill_level < SAMPLING_RATE:
                 metric_vad.metric("Status", "Buffering...")
                 continue
 
-            # --- VAD ---
-            # Check the last 0.5 seconds for speech
+            # VAD
             vad_window = audio_buffer[-int(0.5 * SAMPLING_RATE):]
             vad_tensor = torch.tensor(vad_window)
             
-            # We split into chunks for VAD
             has_speech = False
             vad_chunks = len(vad_window) // VAD_CHUNK_SIZE
             for i in range(vad_chunks):
@@ -253,12 +245,10 @@ if ctx.state.playing:
                     has_speech = True
                     break
             
-            # --- EMOTION & TRANSCRIPTION ---
             if has_speech:
                 if enable_transcription: 
                     speech_buffer.append(new_data)
                 
-                # Emotion Inference (Quantized models need CPU tensors)
                 inputs = processor(
                     torch.tensor(audio_buffer), 
                     sampling_rate=SAMPLING_RATE, 
@@ -275,20 +265,17 @@ if ctx.state.playing:
             else:
                 smoothed_probs = 0.05 * uniform_probs + 0.95 * smoothed_probs
                 
-                # Transcribe on Silence
                 if len(speech_buffer) > 0 and enable_transcription:
-                    # Only transcribe if buffer is substantial (> 1 sec)
                     total_speech = np.concatenate(speech_buffer)
-                    if len(total_speech) > SAMPLING_RATE: 
+                    # Transcribe only if segment is long enough to be a word
+                    if len(total_speech) > int(0.8 * SAMPLING_RATE): 
                         text = transcribe_audio(total_speech)
                         if text:
                             full_transcript += f" {text}"
-                            # Show last 100 chars
                             display = "..." + full_transcript[-100:] if len(full_transcript) > 100 else full_transcript
                             transcription_placeholder.markdown(f"<div class='transcript-box'>{display}</div>", unsafe_allow_html=True)
                     speech_buffer = []
 
-            # --- UI UPDATES ---
             st.session_state.emotion_history.append(smoothed_probs)
             
             top_id = np.argmax(smoothed_probs)
@@ -299,7 +286,6 @@ if ctx.state.playing:
             metric_confidence.metric("Confidence", f"{top_conf:.0%}")
             metric_vad.metric("Voice Status", "🗣️ Speaking" if has_speech else "🤫 Silence")
             
-            # Update Chart every 5 iterations (reduce lag)
             if len(st.session_state.emotion_history) % 5 == 0:
                 df = pd.DataFrame(st.session_state.emotion_history, columns=list(model.config.id2label.values()))
                 if len(df) > 60: df = df.tail(60)
@@ -310,5 +296,6 @@ if ctx.state.playing:
                 )
                 
         except Exception as e:
-            st.error(f"An error occurred: {e}")
+            # This helps debug issues in the cloud logs
+            print(f"Error in loop: {e}")
             break
