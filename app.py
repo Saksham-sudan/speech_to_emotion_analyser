@@ -7,6 +7,7 @@ import librosa
 import torch
 import time
 import queue
+import plotly.graph_objects as go
 from transformers import (
     Wav2Vec2ForSequenceClassification,
     Wav2Vec2Processor,
@@ -15,10 +16,46 @@ from transformers import (
     WhisperForConditionalGeneration
 )
 
-# --- CONFIGURATION ---
-MODEL_NAME = "r-f/wav2vec-english-speech-emotion-recognition"
-ASR_MODEL_NAME = "openai/whisper-tiny" 
+# --- 1. CONFIGURATION ---
+st.set_page_config(
+    page_title="EmoVoice Analytics",
+    page_icon="🎙️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
+# Custom CSS for a professional look
+st.markdown("""
+<style>
+    .stApp {
+        background-color: #0e1117;
+    }
+    div.stButton > button:first-child {
+        background-color: #ff4b4b;
+        color: white;
+        border-radius: 10px;
+        border: none;
+        padding: 10px 20px;
+        font-weight: bold;
+    }
+    div.stButton > button:first-child:hover {
+        background-color: #ff6b6b;
+    }
+    .transcript-box {
+        border: 1px solid #4b5563;
+        border-radius: 10px;
+        padding: 15px;
+        background-color: #1f2937;
+        color: #e5e7eb;
+        font-style: italic;
+        margin-bottom: 20px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Constants
+MODEL_NAME = "harshit345/xlsr-wav2vec-speech-emotion-recognition"
+ASR_MODEL_NAME = "distil-whisper/distil-small.en"
 SAMPLING_RATE = 16000
 WINDOW_DURATION = 3
 STEP_DURATION = 0.5
@@ -28,397 +65,327 @@ CONFIDENCE_THRESHOLD = 0.05
 ALPHA = 0.2
 VAD_CHUNK_SIZE = 512
 
+# --- 2. MODEL LOADING ---
 @st.cache_resource
 def load_models():
-    # 1. Emotion Model
-    try:
-        processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME)
-    except Exception:
-        processor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_NAME)
-    model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_NAME)
-    model.eval()
-    
-    # 2. VAD Model
-    vad_model, _ = torch.hub.load(
-        repo_or_dir='snakers4/silero-vad',
-        model='silero_vad',
-        force_reload=False
-    )
-    
-    # 3. Whisper Transcription Model
-    asr_processor = WhisperProcessor.from_pretrained(ASR_MODEL_NAME)
-    asr_model = WhisperForConditionalGeneration.from_pretrained(ASR_MODEL_NAME)
-    asr_model.eval()
+    with st.spinner("Loading AI Models (Wav2Vec2 + Whisper)..."):
+        # Emotion
+        try:
+            processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME)
+        except Exception:
+            processor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_NAME)
+        model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_NAME)
+        model.eval()
+        
+        # VAD
+        vad_model, _ = torch.hub.load(
+            repo_or_dir='snakers4/silero-vad',
+            model='silero_vad',
+            force_reload=False
+        )
+        
+        # Transcription
+        asr_processor = WhisperProcessor.from_pretrained(ASR_MODEL_NAME)
+        asr_model = WhisperForConditionalGeneration.from_pretrained(ASR_MODEL_NAME)
+        asr_model.eval()
 
     return processor, model, vad_model, asr_processor, asr_model
 
 processor, model, vad_model, asr_processor, asr_model = load_models()
 
-st.set_page_config(page_title="🎙️ Real-Time Speech Emotion Analyzer", layout="centered")
-st.title("🎙️ Real-Time Speech Emotion Analyzer")
-st.markdown("This app uses a **sliding window**, **VAD**, and **Whisper** for high-accuracy real-time analysis.")
-
-mode = st.radio(
-    "Choose analysis mode:",
-    ("🎙️ Live", "📂 File"),
-    horizontal=True
-)
-
-emotion_placeholder = st.empty()
-confidence_placeholder = st.empty()
-
-st.markdown("---") 
-st.markdown("### Top 3 Emotions:")
-top1_placeholder = st.empty()
-top2_placeholder = st.empty()
-top3_placeholder = st.empty()
-
-st.markdown("---")
-st.markdown("### Transcription")
-transcription_placeholder = st.empty()
-
-st.markdown("---")
-st.markdown("### Emotion Timeline")
-chart_placeholder = st.empty()
-
-
-data_queue = queue.Queue()
-if 'emotion_history' not in st.session_state:
-    st.session_state.emotion_history = []
-
-num_labels = len(model.config.id2label)
-smoothed_probs = np.zeros(num_labels, dtype='float32')
-
-def audio_callback(indata, frames, time, status):
-    if status:
-        print(status, flush=True)
-    data_queue.put(indata.copy())
-
-# --- HELPER: TRANSCRIPTION FUNCTION ---
+# --- 3. HELPER FUNCTIONS ---
 def transcribe_audio(audio_data):
     input_features = asr_processor(
         audio_data, 
         sampling_rate=SAMPLING_RATE, 
         return_tensors="pt"
     ).input_features
-    
     with torch.no_grad():
-        predicted_ids = asr_model.generate(input_features)
-    
+        predicted_ids = asr_model.generate(input_features, max_new_tokens=128, forced_decoder_ids=None)
     transcription = asr_processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
     return transcription.strip()
 
-if mode == "🎙️ Live":
-    # --- UI CONTROLS ---
-    col1, col2 = st.columns(2)
-    with col1:
-        run_button = st.toggle("🎧 Start / Stop Listening")
-    with col2:
-        enable_transcription = st.toggle("📝 Enable Transcription", value=True)
-
-    if run_button:
-        st.info("Listening... Speak now 🎤")
-        audio_buffer = np.zeros(WINDOW_SAMPLES, dtype='float32')
+def create_stable_chart(history_df, labels):
+    # Create a Plotly figure that doesn't jump around
+    fig = go.Figure()
     
-        stream = sd.InputStream(
-            callback=audio_callback,
-            channels=1,
-            samplerate=SAMPLING_RATE,
-            blocksize=SAMPLES_PER_STEP
-        )
+    # Add a line for each emotion
+    for label in labels:
+        if label in history_df.columns:
+            fig.add_trace(go.Scatter(
+                x=history_df.index * 0.5, 
+                y=history_df[label],
+                mode='lines',
+                name=label.capitalize(),
+                line=dict(width=2)
+            ))
+            
+    fig.update_layout(
+        xaxis_title="Time (seconds)",
+        yaxis_title="Confidence",
+        yaxis=dict(range=[0, 1.05]), # Fixed Y-axis for stability
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color="white"),
+        margin=dict(l=0, r=0, t=30, b=0),
+        legend=dict(orientation="h", y=1.1)
+    )
+    return fig
+
+# --- 4. UI LAYOUT ---
+
+# Sidebar
+with st.sidebar:
+    st.title("⚙️ Settings")
+    st.markdown("Configure your analysis session.")
+    enable_transcription = st.toggle("📝 Enable Transcription", value=True)
+    st.divider()
+    st.info("Uses **Wav2Vec2** for emotions and **Whisper** for text. Processing happens locally.")
+
+# Main Header
+st.title("🎙️ EmoVoice Analytics")
+st.markdown("Real-time emotional intelligence dashboard.")
+
+# State Setup
+if 'emotion_history' not in st.session_state:
+    st.session_state.emotion_history = []
+data_queue = queue.Queue()
+
+def audio_callback(indata, frames, time, status):
+    if status: print(status, flush=True)
+    data_queue.put(indata.copy())
+
+# Tabs for Modes
+tab_live, tab_file, tab_report = st.tabs(["🔴 Live Analysis", "📂 File Upload", "📊 Session Report"])
+
+# --- TAB 1: LIVE ANALYSIS ---
+with tab_live:
+    col_start, col_status = st.columns([1, 3])
+    with col_start:
+        run_button = st.toggle("Start Recording", key="live_btn")
+    with col_status:
+        if run_button:
+            st.success("System Active & Listening...")
+        else:
+            st.warning("System Standby")
+
+    # HUD (Heads Up Display)
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        metric_emotion = st.empty()
+    with m2:
+        metric_confidence = st.empty()
+    with m3:
+        metric_vad = st.empty()
+
+    st.divider()
+
+    # Chart & Transcript Area
+    col_viz, col_text = st.columns([2, 1])
+    
+    with col_viz:
+        st.subheader("Emotion Timeline")
+        chart_placeholder = st.empty()
+        
+    with col_text:
+        st.subheader("Live Transcript")
+        transcription_placeholder = st.empty()
+        
+    # --- LOGIC LOOP ---
+    if run_button:
+        audio_buffer = np.zeros(WINDOW_SAMPLES, dtype='float32')
+        stream = sd.InputStream(callback=audio_callback, channels=1, samplerate=SAMPLING_RATE, blocksize=SAMPLES_PER_STEP)
         stream.start()
+        
         st.session_state.emotion_history = []
         speech_buffer = []
-
+        
+        # Init Placeholders
+        metric_emotion.metric("Dominant Emotion", "Waiting...")
+        metric_confidence.metric("Confidence", "0%")
+        metric_vad.metric("Voice Status", "Silence")
+        transcription_placeholder.markdown("<div class='transcript-box'>...</div>", unsafe_allow_html=True)
+        
+        # Loop Vars
+        num_labels = len(model.config.id2label)
+        smoothed_probs = np.zeros(num_labels, dtype='float32')
         uniform_probs = np.full(num_labels, 1.0 / num_labels, dtype='float32')
         buffer_is_warm = False
-        warmup_chunks_needed = WINDOW_SAMPLES // SAMPLES_PER_STEP
         current_chunks = 0
+        warmup_chunks_needed = WINDOW_SAMPLES // SAMPLES_PER_STEP
+        full_transcript = ""
 
         while run_button:
             try:
-                # 1. Get RAW chunk
+                # 1. Get Audio
                 raw_chunk = data_queue.get(timeout=0.1).squeeze()
-                
-                # 2. Clean chunk for Emotion Model
                 clean_chunk = nr.reduce_noise(y=raw_chunk, sr=SAMPLING_RATE)
-                
                 audio_buffer = np.roll(audio_buffer, -len(clean_chunk))
                 audio_buffer[-len(clean_chunk):] = clean_chunk
                 
+                # 2. Warmup
                 if not buffer_is_warm:
                     current_chunks += 1
-                    emotion_placeholder.markdown("## 🔥 **Warming up buffer...**")
-                    confidence_placeholder.progress(current_chunks / warmup_chunks_needed)
-                    if current_chunks >= warmup_chunks_needed:
-                        buffer_is_warm = True
+                    metric_vad.metric("Voice Status", f"Warming Up {int((current_chunks/warmup_chunks_needed)*100)}%")
+                    if current_chunks >= warmup_chunks_needed: buffer_is_warm = True
                     continue
 
-                # 3. VAD Logic
+                # 3. VAD
                 has_speech = False
                 num_vad_chunks = len(clean_chunk) // VAD_CHUNK_SIZE
                 for i in range(num_vad_chunks):
-                    start = i * VAD_CHUNK_SIZE
-                    end = start + VAD_CHUNK_SIZE
-                    vad_input_tensor = torch.tensor(clean_chunk[start:end])
-                    speech_prob = vad_model(vad_input_tensor, SAMPLING_RATE).item()
-                    if speech_prob > 0.5:
+                    vad_tensor = torch.tensor(clean_chunk[i*VAD_CHUNK_SIZE:(i+1)*VAD_CHUNK_SIZE])
+                    if vad_model(vad_tensor, SAMPLING_RATE).item() > 0.5:
                         has_speech = True
                         break
-                
-                # 4. Logic Handling
+
+                # 4. Processing
                 if has_speech:
-                    # If transcription is enabled, save RAW audio
-                    if enable_transcription:
-                        speech_buffer.append(raw_chunk) 
+                    if enable_transcription: speech_buffer.append(raw_chunk)
                     
-                    # Emotion Prediction
                     audio_tensor = torch.tensor(audio_buffer)
                     inputs = processor(audio_tensor, sampling_rate=SAMPLING_RATE, return_tensors="pt", padding=True)
                     with torch.no_grad():
                         logits = model(**inputs).logits
                     current_probs = torch.softmax(logits, dim=1)[0].numpy()
                     smoothed_probs = ALPHA * current_probs + (1 - ALPHA) * smoothed_probs
-                
                 else:
-                    # Silence Detected
                     smoothed_probs = 0.05 * uniform_probs + 0.95 * smoothed_probs
                     
-                    # --- CHECK TRANSCRIPTION TOGGLE ---
-                    if len(speech_buffer) > 0:
-                        if enable_transcription:
-                            with st.spinner("Transcribing..."):
-                                speech_audio = np.concatenate(speech_buffer)
-                                text = transcribe_audio(speech_audio)
-                                if len(text) > 0:
-                                    transcription_placeholder.markdown(f"**You said:** *{text}*")
-                        
-                        # Always clear buffer on silence to prevent memory leaks
-                        speech_buffer = [] 
+                    # Transcribe on Silence
+                    if len(speech_buffer) > 0 and enable_transcription:
+                        with st.spinner("Processing text..."):
+                            text = transcribe_audio(np.concatenate(speech_buffer))
+                            if text:
+                                full_transcript += f" {text}"
+                                # Keep only last 200 chars for clean UI
+                                display_text = "..." + full_transcript[-200:] if len(full_transcript) > 200 else full_transcript
+                                transcription_placeholder.markdown(f"<div class='transcript-box'>{display_text}</div>", unsafe_allow_html=True)
+                        speech_buffer = []
 
-                # 5. UI Update
+                # 5. UI Updates
                 st.session_state.emotion_history.append(smoothed_probs)
                 
-                top_3_indices = np.argsort(smoothed_probs)[-3:][::-1]
-                top_emotion = model.config.id2label[top_3_indices[0]]
-                top_confidence = smoothed_probs[top_3_indices[0]]
+                # Update Metrics
+                top_id = np.argmax(smoothed_probs)
+                top_lbl = model.config.id2label[top_id].capitalize()
+                top_conf = smoothed_probs[top_id]
                 
-                if top_confidence > CONFIDENCE_THRESHOLD and has_speech:
-                    emotion_placeholder.markdown(f"## 🎭 Emotion: **{top_emotion.capitalize()}**")
-                    confidence_placeholder.progress(float(top_confidence))
+                metric_emotion.metric("Dominant Emotion", top_lbl)
+                metric_confidence.metric("Confidence", f"{top_conf:.0%}")
+                metric_vad.metric("Voice Status", "🗣️ Speaking" if has_speech else "🤫 Silence")
+                
+                # Update Chart (Every 2 steps for performance)
+                if len(st.session_state.emotion_history) % 2 == 0:
+                    df = pd.DataFrame(st.session_state.emotion_history, columns=list(model.config.id2label.values()))
+                    # Trim for speed
+                    if len(df) > 60: df = df.tail(60)
                     
-                    e2_label = model.config.id2label[top_3_indices[1]].capitalize()
-                    e2_conf = smoothed_probs[top_3_indices[1]]
-                    e3_label = model.config.id2label[top_3_indices[2]].capitalize()
-                    e3_conf = smoothed_probs[top_3_indices[2]]
-
-                    top1_placeholder.markdown(f"1. **{top_emotion.capitalize()}** ({top_confidence:.1%})")
-                    top2_placeholder.markdown(f"2. {e2_label} ({e2_conf:.1%})")
-                    top3_placeholder.markdown(f"3. {e3_label} ({e3_conf:.1%})")
-                else:
-                    emotion_placeholder.markdown("## 🤔 Emotion: **Listening...**")
-                    confidence_placeholder.progress(0.0)
-                    top1_placeholder.markdown("1. ...")
-                    top2_placeholder.markdown("2. ...")
-                    top3_placeholder.markdown("3. ...")
-                    # Note: We do NOT clear the transcription placeholder here so you can read it
-
-                if len(st.session_state.emotion_history) > 1:
-                    emotion_labels = list(model.config.id2label.values())
-                    history_df = pd.DataFrame(
-                        st.session_state.emotion_history,
-                        columns=emotion_labels
-                    )
-                    if len(history_df) > 60:
-                        history_df = history_df.tail(60)
-                    chart_placeholder.line_chart(history_df)
+                    fig = create_stable_chart(df, list(model.config.id2label.values()))
+                    chart_placeholder.plotly_chart(fig, use_container_width=True, key=f"live_{len(st.session_state.emotion_history)}")
 
             except queue.Empty:
                 time.sleep(0.05)
                 continue
-
-        # Final check on Stop
-        if len(speech_buffer) > 0 and enable_transcription:
-             with st.spinner("Finalizing transcription..."):
-                speech_audio = np.concatenate(speech_buffer)
-                speech_buffer = []
-                text = transcribe_audio(speech_audio)
-                if len(text) > 0:
-                    transcription_placeholder.markdown(f"**You said:** *{text}*")
         
+        # Stop Clean up
+        if len(speech_buffer) > 0 and enable_transcription:
+            text = transcribe_audio(np.concatenate(speech_buffer))
+            if text:
+                full_transcript += f" {text}"
+                transcription_placeholder.markdown(f"<div class='transcript-box'>{full_transcript}</div>", unsafe_allow_html=True)
+                
         stream.stop()
         stream.close()
-        st.warning("🛑 Listening stopped.")
 
-elif mode == "📂 File":
-    uploaded_file = st.file_uploader(
-        "Upload an audio file (WAV or MP3)",
-        type=["wav", "mp3"]
-    )
+# --- TAB 2: FILE UPLOAD ---
+with tab_file:
+    uploaded_file = st.file_uploader("Upload Audio (WAV/MP3)", type=["wav", "mp3"])
     
-    # --- UI CONTROLS FOR FILE MODE ---
-    enable_transcription = st.toggle("📝 Enable Transcription for File", value=True)
-    
-    if uploaded_file is not None:
-        with st.spinner(f"Analyzing '{uploaded_file.name}'..."):
-            
-            try:
-                y, sr = librosa.load(uploaded_file, sr=SAMPLING_RATE)
-            except Exception as e:
-                st.error(f"Error loading audio file: {e}")
-                st.stop()
-                
-            st.info("Applying noise reduction to file...")
+    if uploaded_file and st.button("Analyze File"):
+        with st.status("Processing File...", expanded=True) as status:
+            st.write("Loading audio...")
+            y, sr = librosa.load(uploaded_file, sr=SAMPLING_RATE)
+            st.write("Reducing noise...")
             y_clean = nr.reduce_noise(y=y, sr=SAMPLING_RATE)
-            st.info("Noise reduction complete. Starting analysis...")
             
+            st.write("Analyzing emotions & text...")
+            # (Simplified loop for file similar to previous code)
             st.session_state.emotion_history = []
             audio_buffer = np.zeros(WINDOW_SAMPLES, dtype='float32')
             smoothed_probs = np.zeros(num_labels, dtype='float32')
-            uniform_probs = np.full(num_labels, 1.0 / num_labels, dtype='float32')
-            
-            buffer_is_warm = False
-            warmup_chunks_needed = WINDOW_SAMPLES // SAMPLES_PER_STEP
-            current_chunks = 0
-            
-            st.markdown("Processing file:")
-            progress_bar = st.progress(0.0)
-            
-            total_chunks = len(y) // SAMPLES_PER_STEP
             file_speech_buffer = []
             
+            total_chunks = len(y) // SAMPLES_PER_STEP
+            prog = st.progress(0)
+            
+            # Warmup logic
+            warmed = False
+            cur_chunks = 0
+            
             for i in range(total_chunks):
-                chunk = y_clean[i * SAMPLES_PER_STEP : (i + 1) * SAMPLES_PER_STEP]
-                
-                if len(chunk) < SAMPLES_PER_STEP:
-                    chunk = np.pad(chunk, (0, SAMPLES_PER_STEP - len(chunk)))
+                chunk = y_clean[i*SAMPLES_PER_STEP:(i+1)*SAMPLES_PER_STEP]
+                if len(chunk) < SAMPLES_PER_STEP: chunk = np.pad(chunk, (0, SAMPLES_PER_STEP-len(chunk)))
                 
                 audio_buffer = np.roll(audio_buffer, -len(chunk))
                 audio_buffer[-len(chunk):] = chunk
                 
-                if not buffer_is_warm:
-                    current_chunks += 1
-                    if current_chunks >= warmup_chunks_needed:
-                        buffer_is_warm = True
+                if not warmed:
+                    cur_chunks += 1
+                    if cur_chunks >= warmup_chunks_needed: warmed = True
                     continue
-
+                
+                # Check VAD
                 has_speech = False
-                num_vad_chunks = len(chunk) // VAD_CHUNK_SIZE
-                for j in range(num_vad_chunks):
-                    start = j * VAD_CHUNK_SIZE
-                    end = start + VAD_CHUNK_SIZE
-                    vad_input_tensor = torch.tensor(chunk[start:end])
-                    speech_prob = vad_model(vad_input_tensor, SAMPLING_RATE).item()
-                    if speech_prob > 0.5:
-                        has_speech = True
-                        break
-
+                num_vad = len(chunk) // VAD_CHUNK_SIZE
+                for j in range(num_vad):
+                    if vad_model(torch.tensor(chunk[j*512:(j+1)*512]), SAMPLING_RATE).item() > 0.5:
+                        has_speech = True; break
+                
                 if has_speech:
-                    if enable_transcription:
-                        file_speech_buffer.append(chunk)
-                        
-                    audio_tensor = torch.tensor(audio_buffer)
-                    inputs = processor(audio_tensor, sampling_rate=SAMPLING_RATE, return_tensors="pt", padding=True)
-                    with torch.no_grad():
-                        logits = model(**inputs).logits
-                    current_probs = torch.softmax(logits, dim=1)[0].numpy()
-                    smoothed_probs = ALPHA * current_probs + (1 - ALPHA) * smoothed_probs
+                    if enable_transcription: file_speech_buffer.append(chunk)
+                    inputs = processor(torch.tensor(audio_buffer), sampling_rate=SAMPLING_RATE, return_tensors="pt", padding=True)
+                    with torch.no_grad(): logits = model(**inputs).logits
+                    smoothed_probs = ALPHA * torch.softmax(logits, dim=1)[0].numpy() + (1-ALPHA)*smoothed_probs
                 else:
                     smoothed_probs = 0.05 * uniform_probs + 0.95 * smoothed_probs
-                    
-                    # File Transcription Check
-                    if len(file_speech_buffer) > 0:
-                        if enable_transcription:
-                            speech_audio = np.concatenate(file_speech_buffer)
-                            text = transcribe_audio(speech_audio)
-                            if len(text) > 0:
-                                transcription_placeholder.markdown(f"**Transcript:** *{text}*")
-                        file_speech_buffer = []
+                    # Transcribe intermediate
+                    if len(file_speech_buffer) > 0 and enable_transcription:
+                         # For file speed, maybe just accumulate and do at end or large chunks
+                         pass 
 
                 st.session_state.emotion_history.append(smoothed_probs)
-                
-                top_3_indices = np.argsort(smoothed_probs)[-3:][::-1]
-                top_emotion = model.config.id2label[top_3_indices[0]]
-                top_confidence = smoothed_probs[top_3_indices[0]]
-                
-                if top_confidence > CONFIDENCE_THRESHOLD and has_speech:
-                    emotion_placeholder.markdown(f"## 🎭 Emotion: **{top_emotion.capitalize()}**")
-                    confidence_placeholder.progress(float(top_confidence))
-                    
-                    e2_label = model.config.id2label[top_3_indices[1]].capitalize()
-                    e2_conf = smoothed_probs[top_3_indices[1]]
-                    e3_label = model.config.id2label[top_3_indices[2]].capitalize()
-                    e3_conf = smoothed_probs[top_3_indices[2]]
-
-                    top1_placeholder.markdown(f"1. **{top_emotion.capitalize()}** ({top_confidence:.1%})")
-                    top2_placeholder.markdown(f"2. {e2_label} ({e2_conf:.1%})")
-                    top3_placeholder.markdown(f"3. {e3_label} ({e3_conf:.1%})")
-                else:
-                    emotion_placeholder.markdown("## 🤔 Emotion: **Analyzing...**")
-                    confidence_placeholder.progress(0.0)
-                    top1_placeholder.markdown("1. ...")
-                    top2_placeholder.markdown("2. ...")
-                    top3_placeholder.markdown("3. ...")
-                    transcription_placeholder.empty()
-
-                    if i % 10 == 0 and len(st.session_state.emotion_history) > 1:
-                        emotion_labels = list(model.config.id2label.values())
-                        history_df = pd.DataFrame(
-                            st.session_state.emotion_history,
-                            columns=emotion_labels
-                        )
-                        if len(history_df) > 60:
-                            history_df = history_df.tail(60)
-                    
-                        chart_placeholder.line_chart(history_df)
-                
-                progress_bar.progress((i + 1) / total_chunks)
+                prog.progress((i+1)/total_chunks)
+            
+            status.update(label="Analysis Complete!", state="complete")
         
-        # Final File Check
-        if len(file_speech_buffer) > 0 and enable_transcription:
-            speech_audio = np.concatenate(file_speech_buffer)
-            text = transcribe_audio(speech_audio)
-            if len(text) > 0:
-                transcription_placeholder.markdown(f"**Transcript:** *{text}*")
+        # Show Results
+        if enable_transcription and len(file_speech_buffer) > 0:
+            st.subheader("Transcript")
+            final_text = transcribe_audio(np.concatenate(file_speech_buffer))
+            st.markdown(f"<div class='transcript-box'>{final_text}</div>", unsafe_allow_html=True)
+            
+        if len(st.session_state.emotion_history) > 0:
+            st.subheader("Emotion Timeline")
+            df = pd.DataFrame(st.session_state.emotion_history, columns=list(model.config.id2label.values()))
+            st.plotly_chart(create_stable_chart(df, list(model.config.id2label.values())), use_container_width=True)
 
-        st.success(f"✅ Analysis complete!")
-        st.balloons()
+# --- TAB 3: REPORT ---
+with tab_report:
+    st.markdown("Download the raw data from your latest session.")
+    if len(st.session_state.emotion_history) > 0:
+        df = pd.DataFrame(st.session_state.emotion_history, columns=list(model.config.id2label.values()))
+        df['Time'] = df.index * STEP_DURATION
         
-        if len(st.session_state.emotion_history) > 1:
-            emotion_labels = list(model.config.id2label.values())
-            history_df = pd.DataFrame(
-                st.session_state.emotion_history,
-                columns=emotion_labels
-            )
-            chart_placeholder.line_chart(history_df)
-       
-
-st.markdown("---")
-st.markdown("### Session Report")
-
-
-if len(st.session_state.emotion_history) > 1:
-    emotion_labels = list(model.config.id2label.values())
-    
-    final_history_df = pd.DataFrame(
-        st.session_state.emotion_history,
-        columns=emotion_labels
-    )
-    
-    final_history_df["Time (s)"] = final_history_df.index * STEP_DURATION
-    
-    csv_data = final_history_df.to_csv(index=False).encode('utf-8')
-    
-    st.download_button(
-        label="📥 Download Session Report (CSV)",
-        data=csv_data,
-        file_name="emotion_session_report.csv",
-        mime="text/csv",
-    )
-else:
-    st.caption("No session data to download. Press 'Start Listening' to record a session.")
-
-if st.button("🧹 Clear History & Chart"):
-    st.session_state.emotion_history = []
-    chart_placeholder.empty()
-    st.rerun()
+        col_dl, col_clear = st.columns(2)
+        with col_dl:
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download CSV", csv, "emotion_data.csv", "text/csv")
+        with col_clear:
+            if st.button("🗑️ Clear History"):
+                st.session_state.emotion_history = []
+                st.rerun()
+        
+        st.dataframe(df.head(50), use_container_width=True)
+    else:
+        st.info("No data recorded yet. Go to 'Live Analysis' or 'File Upload' to generate data.")
