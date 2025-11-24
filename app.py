@@ -56,6 +56,14 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Add title and description at the very top
+st.markdown("""
+<div style='text-align: center; padding: 20px 0 10px 0;'>
+    <h1 style='color: #667eea; font-size: 3em; margin-bottom: 10px;'>🎙️ EmoVoice Analytics</h1>
+    <p style='color: #9ca3af; font-size: 1.2em;'>Real-time Speech Emotion Recognition & Analysis Platform</p>
+</div>
+""", unsafe_allow_html=True)
+
 # Enhanced Custom CSS
 st.markdown("""
 <style>
@@ -322,18 +330,53 @@ def render_dominant_emotion_card(emotion, confidence):
 with st.sidebar:
     st.title("⚙️ Settings")
     st.markdown("Configure your analysis session.")
-    enable_transcription = st.toggle("📝 Enable Transcription", value=True)
-    chart_type = st.selectbox("Chart Style", ["Line", "Stacked", "Heatmap"], index=0)
-    st.divider()
-    st.info("Uses **Wav2Vec2** for emotions and **Whisper** for text. Processing happens locally.")
     
-    # Additional settings
-    st.markdown("### Advanced")
-    show_confidence_threshold = st.slider("Confidence Display Threshold", 0.0, 1.0, 0.3, 0.05)
+    # Key Settings
+    enable_transcription = st.toggle("📝 Enable Transcription", value=True, help="Enable real-time speech-to-text conversion")
+    chart_type = st.selectbox("Chart Style", ["Line", "Stacked", "Heatmap"], index=0, help="Choose visualization style")
+    
+    st.divider()
+    
+    # Model Info
+    st.markdown("### 🤖 AI Models")
+    st.info("""
+    **Emotion Detection:** Wav2Vec2  
+    **Speech Recognition:** Whisper Tiny  
+    **Voice Activity:** Silero VAD
+    """)
+    
+    st.divider()
+    
+    # Advanced settings
+    st.markdown("### 🔧 Advanced")
+    show_confidence_threshold = st.slider("Confidence Threshold", 0.0, 1.0, 0.3, 0.05, help="Minimum confidence to display")
+    
+    st.divider()
+    
+    # About section
+    with st.expander("ℹ️ About This Project"):
+        st.markdown("""
+        **EmoVoice Analytics** uses deep learning to analyze emotions in speech.
+        
+        **Features:**
+        - Real-time emotion detection
+        - Speech transcription
+        - Multi-emotion tracking
+        - Comprehensive analytics
+        
+        **Technologies:**
+        - Streamlit
+        - PyTorch
+        - Transformers (Hugging Face)
+        - Plotly
+        """)
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("<p style='text-align: center; color: #6b7280; font-size: 0.85em;'>Built with ❤️ using Streamlit</p>", unsafe_allow_html=True)
     
 # Main Header
-st.title("🎙️ EmoVoice Analytics")
-st.markdown("Real-time emotional intelligence dashboard with advanced visualization.")
+st.divider()
 
 # State Setup
 if 'emotion_history' not in st.session_state:
@@ -551,6 +594,9 @@ with tab_live:
             except queue.Empty:
                 time.sleep(0.05)
                 continue
+            except Exception as e:
+                st.error(f"Error during processing: {str(e)}")
+                break
         
         stream.stop()
         stream.close()
