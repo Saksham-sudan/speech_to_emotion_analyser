@@ -69,7 +69,7 @@ def load_models():
         vad_model, _ = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
             model='silero_vad',
-            force_reload=False
+            force_reload=False,
             trust_repo=True
         )
         
@@ -300,4 +300,5 @@ if ctx.state.playing:
             # This helps debug issues in the cloud logs
             print(f"Error in loop: {e}")
             break
+
 
