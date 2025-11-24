@@ -8,3 +8,4 @@ noisereduce
 plotly
 streamlit-webrtc
 av
+sentencepiece
