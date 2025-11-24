@@ -1,0 +1,10 @@
+streamlit
+numpy
+pandas
+torch
+transformers
+librosa
+noisereduce
+plotly
+streamlit-webrtc
+av
