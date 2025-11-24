@@ -40,7 +40,7 @@ st.markdown("""
 
 # --- UPDATED CONSTANTS (High Accuracy) ---
 # 1. Emotion: XLSR (Better at accents/tone than the previous r-f model)
-MODEL_NAME = "harshit345/xlsr-wav2vec-speech-emotion-recognition"
+MODEL_NAME = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
 
 # 2. Transcription: Distil-Whisper (Better than Tiny, Faster than Normal Small)
 ASR_MODEL_NAME = "distil-whisper/distil-small.en"
@@ -70,6 +70,7 @@ def load_models():
             repo_or_dir='snakers4/silero-vad',
             model='silero_vad',
             force_reload=False
+            trust_repo=True
         )
         
         # 3. Transcription Model
@@ -299,3 +300,4 @@ if ctx.state.playing:
             # This helps debug issues in the cloud logs
             print(f"Error in loop: {e}")
             break
+
