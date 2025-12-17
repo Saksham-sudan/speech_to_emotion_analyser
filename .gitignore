@@ -1,0 +1,18 @@
+# Models (Too large for GitHub)
+distilhubert_hybrid_final/
+*.safetensors
+*.bin
+*.pt
+
+# Python
+__pycache__/
+*.pyc
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Environment
+.env
+.venv
+env/
+venv/
