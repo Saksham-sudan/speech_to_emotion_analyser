@@ -52,7 +52,7 @@ from transformers import (
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(
-    page_title="EmoVoice Analytics",
+    page_title="Speech to Tone and Emotion Recognition",
     page_icon="🎙️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -61,7 +61,7 @@ st.set_page_config(
 # Add title and description at the very top
 st.markdown("""
 <div style='text-align: center; padding: 20px 0 10px 0;'>
-    <h1 style='color: #667eea; font-size: 3em; margin-bottom: 10px;'>🎙️ EmoVoice Analytics</h1>
+    <h1 style='color: #667eea; font-size: 3em; margin-bottom: 10px;'>🎙️ Speech to Tone and Emotion Recognition</h1>
     <p style='color: #9ca3af; font-size: 1.2em;'>Real-time Speech Emotion Recognition & Analysis Platform</p>
 </div>
 """, unsafe_allow_html=True)
