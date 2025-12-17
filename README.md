@@ -1,71 +1,57 @@
-# 🎙️ Speech to Tone and Emotion Recognition
+Markdown# Speech to tone and emototion analyzer
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.28%2B-ff4b4b)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c)
-![License](https://img.shields.io/badge/License-MIT-green)
+**Speech to tone and emototion analyzer** is a lightweight, high-performance Speech Emotion Recognition (SER) system designed specifically for the **Call Center** industry. It automates Quality Assurance (QA) by detecting customer frustration and anger in real-time, enabling supervisors to intervene before churn occurs.
 
-A powerful real-time web application that analyzes speech to detect emotions and tone while transcribing audio. Built with **Streamlit**, **PyTorch**, and state-of-the-art **Transformers** models.
+Unlike generic emotion models trained on studio-quality audio, EmoVoice is engineered to handle **noisy, narrowband telephony audio (8kHz)** by leveraging a hybrid training strategy of real-world call data and acoustically augmented studio recordings.
 
-## 🌟 Features
+---
 
-- **🔴 Real-time Analysis**: Live emotion detection from your microphone.
-- **📂 File Upload**: Support for analyzing pre-recorded audio files (WAV, MP3).
-- **📝 Live Transcription**: Real-time speech-to-text using OpenAI's Whisper model.
-- **📈 Interactive Visualizations**: Dynamic emotion timelines and confidence charts.
-- **📊 Session Reports**: detailed analytics and exportable session data.
-- **🗣️ VAD Integrated**: Voice Activity Detection to filter out silence.
+## 🎯 Project Objectives
 
-## 🛠️ Tech Stack
+* **Automate QA:** Replace manual call sampling with 100% automated coverage.
+* **Domain Adaptation:** specialized for the low-fidelity acoustic environment of telephone networks.
+* **Resource Efficiency:** Optimized to run on consumer-grade hardware (e.g., NVIDIA GTX 1650 Ti) using DistilHuBERT and FP16 inference.
 
-- **Framework**: Streamlit
-- **Emotion Model**: Custom DistilHuBERT / Wav2Vec2
-- **ASR Model**: Whisper Tiny
-- **VAD**: Silero VAD
-- **Visualization**: Plotly
+---
 
-## 🚀 Installation
+## 🏗️ Architecture & Approach
 
-1. **Clone the repository** (or download the source code):
+### 1. The Model: DistilHuBERT
+We utilize `ntu-spml/distilhubert`, a knowledge-distilled version of HuBERT. It retains most of the performance of large speech models while being **75% smaller and 73% faster**, making it ideal for real-time deployment on edge devices or modest servers.
+
+### 2. The Hybrid Dataset Strategy
+To solve the "Data Scarcity" problem in SER, we combined two distinct datasets:
+
+* **LEGOv2 (Real World):** Contains authentic, unscripted interactions of customers talking to a bus schedule system. Provides genuine "Frustration" and "Neutral" samples.
+* **CREMA-D (Augmented):** A large-scale acted dataset. We applied a **Telephony Augmentation Pipeline** (Downsampling to 8kHz → Upsampling to 16kHz → Adding Line Noise) to force the model to learn features robust to phone quality.
+
+### 3. Class Mapping
+The system maps complex emotions into actionable Business KPIs:
+* **NEGATIVE (0):** Anger, Frustration, Disgust, Fear (⚠️ Alert Supervisor)
+* **NEUTRAL (1):** Standard interaction
+* **POSITIVE (2):** Happiness, Excitement
+
+---
+
+## 🛠️ Installation
+
+### Prerequisites
+* Python 3.10+
+* CUDA-enabled GPU (Recommended: 4GB VRAM minimum)
+
+### Setup
+1. Clone the repository:
    ```bash
-   git clone <repository-url>
-   cd <repository-directory>
-   ```
+   git clone [https://github.com/yourusername/emovoice-analytics.git](https://github.com/yourusername/emovoice-analytics.git)
+   cd emovoice-analytics
+Install dependencies:Bashpip install torch torchaudio --index-url [https://download.pytorch.org/whl/cu118](https://download.pytorch.org/whl/cu118)
+pip install transformers datasets pandas scikit-learn accelerate
+🚀 Usage1. Training the ModelThe training script automatically handles data loading, augmentation, and GPU optimization (Gradient Accumulation).Bashpython main.py
+Note: Ensure you have downloaded the LEGOv2 and CREMA-D datasets and updated the paths in the CONFIGURATION section of main.py.2. Inference (Prediction)To predict emotions on a new audio file:Pythonfrom transformers import pipeline
 
-2. **Install dependencies**:
-   It is recommended to use a virtual environment.
-   ```bash
-   pip install -r requirements.txt
-   ```
-   *Note: If you encounter issues with `torch`, please visit the [PyTorch website](https://pytorch.org/) for the correct installation command for your system.*
+classifier = pipeline("audio-classification", model="./distilhubert_hybrid_final")
+prediction = classifier("path/to/customer_call.wav")
 
-## 💻 Usage
-
-Run the application using Streamlit:
-
-```bash
-streamlit run main.py
-```
-
-The application will open automatically in your default web browser (usually at `http://localhost:8501`).
-
-### Models Note
-The application expects a custom emotion model in the `./distilhubert_hybrid_final` directory. Ensure this directory exists and contains the model files. If using the default Hugging Face model, modification to `main.py` might be required.
-
-## 📂 Project Structure
-
-```
-├── main.py                     # Primary Application Entry Point
-├── app.py                      # Alternative/Legacy App Version
-├── requirements.txt            # Python Dependencies
-├── distilhubert_hybrid_final/  # Custom Emotion Model Directory
-└── README.md                   # Project Documentation
-```
-
-## 🤝 Contributing
-
-Contributions, issues, and feature requests are welcome!
-
-## 📄 License
-
-This project is licensed under the MIT License.
+print(prediction)
+# Output: [{'label': 'NEGATIVE', 'score': 0.98}, ...]
+📊 Technical Challenges & SolutionsChallengeSolutionCUDA OOM ErrorsImplemented Gradient Accumulation (Steps=16) to simulate large batches on a 4GB GPU.Dataset IncompatibilityBuilt a custom Tokenizer-Level Type Casting pipeline to force all labels to Int64, resolving Windows/PyTorch type conflicts.Domain MismatchApplied On-the-fly Spectral Augmentation to studio data to mimic the frequency response of telephone lines.🔮 Future ScopeSpeaker Diarization: Separate "Agent" vs. "Customer" audio tracks automatically.Dashboard Integration: Build a Streamlit frontend for live visualization of call sentiment.Transcrition (ASR): Integrate OpenAI Whisper to correlate text sentiment with audio emotion.📜 LicenseThis project is open-source and available under the MIT License.
