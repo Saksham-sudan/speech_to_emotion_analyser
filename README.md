@@ -1,35 +1,38 @@
-Markdown# Speech to tone and emototion analyzer
+# 🎙️ Speech to Tone and Emotion Analyzer
 
-**Speech to tone and emototion analyzer** is a lightweight, high-performance Speech Emotion Recognition (SER) system designed specifically for the **Call Center** industry. It automates Quality Assurance (QA) by detecting customer frustration and anger in real-time, enabling supervisors to intervene before churn occurs.
+**Speech to Tone and Emotion Analyzer** is an AI-powered system designed to decode the non-verbal cues in human speech. Optimized for high-noise environments like call centers, it detects underlying emotions—specifically frustration and anger—regardless of the words being spoken.
 
-Unlike generic emotion models trained on studio-quality audio, EmoVoice is engineered to handle **noisy, narrowband telephony audio (8kHz)** by leveraging a hybrid training strategy of real-world call data and acoustically augmented studio recordings.
+Unlike standard models trained on clean studio audio, this project features a **hybrid domain-adaptation engine** that processes low-quality, narrowband telephony audio (8kHz), making it robust for real-world telecommunications and customer support analytics.
 
 ---
 
 ## 🎯 Project Objectives
 
-* **Automate QA:** Replace manual call sampling with 100% automated coverage.
-* **Domain Adaptation:** specialized for the low-fidelity acoustic environment of telephone networks.
-* **Resource Efficiency:** Optimized to run on consumer-grade hardware (e.g., NVIDIA GTX 1650 Ti) using DistilHuBERT and FP16 inference.
+* **Automated Quality Assurance:** Replaces manual call listening with 100% automated coverage of customer interactions.
+* **Tone Detection:** specifically tuned to detect "Negative Tone" (Anger, Frustration, Urgency) in real-time.
+* **Low-Resource Deployment:** Engineered to run efficiently on consumer-grade hardware (e.g., NVIDIA GTX 1650 Ti) using knowledge distillation and quantization techniques.
 
 ---
 
 ## 🏗️ Architecture & Approach
 
-### 1. The Model: DistilHuBERT
-We utilize `ntu-spml/distilhubert`, a knowledge-distilled version of HuBERT. It retains most of the performance of large speech models while being **75% smaller and 73% faster**, making it ideal for real-time deployment on edge devices or modest servers.
+### 1. The Core Model: DistilHuBERT
+We utilize `ntu-spml/distilhubert`, a distilled version of the massive HuBERT model. This architecture retains high-performance speech feature extraction capabilities while being **75% smaller and 73% faster**, enabling low-latency inference on edge devices.
 
-### 2. The Hybrid Dataset Strategy
-To solve the "Data Scarcity" problem in SER, we combined two distinct datasets:
+### 2. Hybrid Data Strategy
+To address the "Simulation vs. Reality" gap in emotion recognition, we combined two distinct datasets:
 
-* **LEGOv2 (Real World):** Contains authentic, unscripted interactions of customers talking to a bus schedule system. Provides genuine "Frustration" and "Neutral" samples.
-* **CREMA-D (Augmented):** A large-scale acted dataset. We applied a **Telephony Augmentation Pipeline** (Downsampling to 8kHz → Upsampling to 16kHz → Adding Line Noise) to force the model to learn features robust to phone quality.
+* **LEGOv2 (Real-World):** Authentic, unscripted recordings of customers interacting with automated bus schedule systems. This captures genuine frustration and "sighs" often missed by actors.
+* **CREMA-D (Augmented):** A diverse, acted dataset used to bolster the model's understanding of extreme emotions. We applied a **Telephony Augmentation Pipeline** (Downsampling to 8kHz → Upsampling to 16kHz + Gaussian Noise) to force the model to learn features robust to telephone line degradation.
 
-### 3. Class Mapping
-The system maps complex emotions into actionable Business KPIs:
-* **NEGATIVE (0):** Anger, Frustration, Disgust, Fear (⚠️ Alert Supervisor)
-* **NEUTRAL (1):** Standard interaction
-* **POSITIVE (2):** Happiness, Excitement
+### 3. Emotion Mapping
+The analyzer classifies audio into three actionable business categories:
+
+| Label | ID | Emotions Covered | Business Implication |
+| :--- | :--- | :--- | :--- |
+| **NEGATIVE** | `0` | Anger, Frustration, Disgust, Fear | 🚨 **Critical:** Requires Supervisor Intervention |
+| **NEUTRAL** | `1` | Calm, Indifferent, Standard Tone | ✅ **Normal:** Standard Interaction |
+| **POSITIVE** | `2` | Happiness, Excitement, Gratitude | 🌟 **Excellent:** Potential Testimonial/Up-sell |
 
 ---
 
@@ -39,19 +42,30 @@ The system maps complex emotions into actionable Business KPIs:
 * Python 3.10+
 * CUDA-enabled GPU (Recommended: 4GB VRAM minimum)
 
-### Setup
-1. Clone the repository:
-   ```bash
-   git clone [https://github.com/yourusername/emovoice-analytics.git](https://github.com/yourusername/emovoice-analytics.git)
-   cd emovoice-analytics
-Install dependencies:Bashpip install torch torchaudio --index-url [https://download.pytorch.org/whl/cu118](https://download.pytorch.org/whl/cu118)
-pip install transformers datasets pandas scikit-learn accelerate
-🚀 Usage1. Training the ModelThe training script automatically handles data loading, augmentation, and GPU optimization (Gradient Accumulation).Bashpython main.py
-Note: Ensure you have downloaded the LEGOv2 and CREMA-D datasets and updated the paths in the CONFIGURATION section of main.py.2. Inference (Prediction)To predict emotions on a new audio file:Pythonfrom transformers import pipeline
+### Setup Steps
+1.  **Clone the Repository:**
+    ```bash
+    git clone [https://github.com/yourusername/speech-to-tone-analyzer.git](https://github.com/yourusername/speech-to-tone-analyzer.git)
+    cd speech-to-tone-analyzer
+    ```
 
-classifier = pipeline("audio-classification", model="./distilhubert_hybrid_final")
-prediction = classifier("path/to/customer_call.wav")
+2.  **Install Dependencies:**
+    ```bash
+    pip install torch torchaudio --index-url [https://download.pytorch.org/whl/cu118](https://download.pytorch.org/whl/cu118)
+    pip install transformers datasets pandas scikit-learn accelerate numpy
+    ```
 
-print(prediction)
-# Output: [{'label': 'NEGATIVE', 'score': 0.98}, ...]
-📊 Technical Challenges & SolutionsChallengeSolutionCUDA OOM ErrorsImplemented Gradient Accumulation (Steps=16) to simulate large batches on a 4GB GPU.Dataset IncompatibilityBuilt a custom Tokenizer-Level Type Casting pipeline to force all labels to Int64, resolving Windows/PyTorch type conflicts.Domain MismatchApplied On-the-fly Spectral Augmentation to studio data to mimic the frequency response of telephone lines.🔮 Future ScopeSpeaker Diarization: Separate "Agent" vs. "Customer" audio tracks automatically.Dashboard Integration: Build a Streamlit frontend for live visualization of call sentiment.Transcrition (ASR): Integrate OpenAI Whisper to correlate text sentiment with audio emotion.📜 LicenseThis project is open-source and available under the MIT License.
+3.  **Prepare Data:**
+    * Download the **LEGOv2** dataset.
+    * Download the **CREMA-D** dataset.
+    * Update the paths in `main.py` under the `CONFIGURATION` section.
+
+---
+
+## 🚀 Usage
+
+### Training the Model
+To start the hybrid training pipeline (which handles data loading, augmentation, and model fine-tuning):
+
+```bash
+python main.py
