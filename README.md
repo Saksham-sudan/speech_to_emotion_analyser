@@ -32,7 +32,7 @@ The analyzer classifies audio into three actionable business categories:
 | :--- | :--- | :--- | :--- |
 | **NEGATIVE** | `0` | Anger, Frustration, Disgust, Fear | 🚨 **Critical:** Requires Supervisor Intervention |
 | **NEUTRAL** | `1` | Calm, Indifferent, Standard Tone | ✅ **Normal:** Standard Interaction |
-| **POSITIVE** | `2` | Happiness, Excitement, Gratitude | 🌟 **Excellent:** Potential Testimonial/Up-sell |
+| **POSITIVE** | `2` | Happiness, Excitement, Gratitude | 🌟 **Excellent:** Potential Testimonial/Up-sell |  
 
 ---
 
